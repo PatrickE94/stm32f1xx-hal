@@ -241,6 +241,14 @@ macro_rules! adc_hal {
                     self.rb.cr2.modify(|_, w| w.extsel().variant(trigger))
                 }
 
+                pub fn set_end_of_conversion_interrupt(&mut self, on: bool) {
+                    self.rb.cr1.modify(|_, w| w.eocie().bit(on));
+                }
+
+                pub fn clear_end_of_conversion_flag(&mut self) {
+                    self.rb.sr.modify(|_, w| w.eoc().clear_bit());
+                }
+
                 fn power_up(&mut self) {
                     self.rb.cr2.modify(|_, w| w.adon().set_bit());
 
@@ -347,6 +355,7 @@ macro_rules! adc_hal {
 
                 fn set_continuous_mode(&mut self, continuous: bool) {
                     self.rb.cr2.modify(|_, w| w.cont().bit(continuous));
+                    self.rb.cr1.modify(|_, w| w.discen().clear_bit());
                 }
 
                 fn set_discontinuous_mode(&mut self, channels_count: Option<u8>) {
@@ -354,6 +363,38 @@ macro_rules! adc_hal {
                         Some(count) => w.discen().set_bit().discnum().bits(count),
                         None => w.discen().clear_bit(),
                     });
+                }
+
+                pub fn current_sample(&mut self) -> u16 {
+                    self.rb.dr.read().data().bits()
+                }
+
+                pub fn check_end_of_conversion(&mut self) -> bool{
+                    self.rb.sr.read().eoc().bit_is_set()
+                }
+
+                pub fn start_conversion(&mut self)
+                {
+                    self.rb.cr2.modify(|_, w| w.adon().set_bit());
+                    self.clear_end_of_conversion_flag();
+
+                    // ADC start conversion of regular sequence
+                    self.rb.cr2.modify(|_, w|
+                        w
+                            .swstart().set_bit()
+                            .align().bit(self.align.into())
+                    );
+
+                    while self.rb.cr2.read().swstart().bit_is_set() {}
+                }
+
+                pub fn configure_channel<PIN>(&mut self, _pin: &mut PIN)
+                where
+                    PIN: Channel<$ADC, ID = u8>,
+                {
+                    let chan = PIN::channel();
+                    self.set_channel_sample_time(chan, self.sample_time);
+                    self.rb.sqr3.modify(|_, w| unsafe { w.sq1().bits(chan) });
                 }
 
                 /**
@@ -373,23 +414,16 @@ macro_rules! adc_hal {
                     // Dummy read in case something accidentally triggered
                     // a conversion by writing to CR2 without changing any
                     // of the bits
-                    self.rb.dr.read().data().bits();
+                    self.current_sample();
 
                     self.set_channel_sample_time(chan, self.sample_time);
                     self.rb.sqr3.modify(|_, w| unsafe { w.sq1().bits(chan) });
 
-                    // ADC start conversion of regular sequence
-                    self.rb.cr2.modify(|_, w|
-                        w
-                            .swstart().set_bit()
-                            .align().bit(self.align.into())
-                    );
-                    while self.rb.cr2.read().swstart().bit_is_set() {}
+                    self.start_conversion();
                     // ADC wait for conversion results
                     while self.rb.sr.read().eoc().bit_is_clear() {}
 
-                    let res = self.rb.dr.read().data().bits();
-                    res
+                    self.current_sample()
                 }
 
                 /// Powers down the ADC, disables the ADC clock and releases the ADC Peripheral
